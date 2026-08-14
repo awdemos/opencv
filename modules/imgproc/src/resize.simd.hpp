@@ -2189,28 +2189,34 @@ struct ResizeAreaFastNoVec
 
 namespace area_fast_detail {
 
+template<typename T> struct area_fast_has_nxn { enum { value = 1 }; };
+template<> struct area_fast_has_nxn<float> { enum { value = 0 }; };
+template<> struct area_fast_has_nxn<double> { enum { value = 0 }; };
+
+template<typename T> struct area_fast_wt { typedef int type; };
+template<> struct area_fast_wt<float> { typedef float type; };
+template<> struct area_fast_wt<double> { typedef double type; };
+
+template<typename T>
 static inline bool is_fast_scale(int scale_x, int scale_y, int cn)
 {
     if (scale_x != scale_y || scale_x < 2 || (scale_x > 4 && scale_x != 10))
         return false;
-    if (scale_x == 2)
-        return cn == 1 || cn == 3 || cn == 4;
-    return cn == 1 || cn == 3 || cn == 4;
+    if (cn != 1 && cn != 3 && cn != 4)
+        return false;
+    return scale_x == 2 || area_fast_has_nxn<T>::value != 0;
 }
 
-template<typename T>
-static inline T area_fast_round(int sum, int area)
+template<typename T, typename WT>
+static inline T area_fast_round(WT sum, int area)
 {
-    if (area == 4)
-        return saturate_cast<T>((sum + 2) >> 2);
-    if (area == 100)
-        return saturate_cast<T>((sum + 50) / 100);
     return saturate_cast<T>(sum * (1.f / area));
 }
 
 template<typename T>
 static int area_fast_tail_nxn_cn1(const T* S, T* D, int w, int dx, int scale, int step)
 {
+    typedef typename area_fast_wt<T>::type WT;
     const int area = scale * scale;
     const T* rows[10] = { S, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     rows[1] = (const T*)((const uchar*)S + step);
@@ -2220,7 +2226,7 @@ static int area_fast_tail_nxn_cn1(const T* S, T* D, int w, int dx, int scale, in
     for (; dx < w; ++dx)
     {
         const int sx = dx * scale;
-        int sum = 0;
+        WT sum = 0;
         for (int ry = 0; ry < scale; ++ry)
             for (int k = 0; k < scale; ++k)
                 sum += rows[ry][sx + k];
@@ -2232,6 +2238,7 @@ static int area_fast_tail_nxn_cn1(const T* S, T* D, int w, int dx, int scale, in
 template<typename T>
 static int area_fast_tail_nxn_cn3(const T* S, T* D, int w, int dx, int scale, int step)
 {
+    typedef typename area_fast_wt<T>::type WT;
     const int area = scale * scale;
     const T* rows[10] = { S, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     rows[1] = (const T*)((const uchar*)S + step);
@@ -2243,7 +2250,7 @@ static int area_fast_tail_nxn_cn3(const T* S, T* D, int w, int dx, int scale, in
         const int sx = dx * scale;
         for (int c = 0; c < 3; ++c)
         {
-            int sum = 0;
+            WT sum = 0;
             for (int ry = 0; ry < scale; ++ry)
                 for (int k = 0; k < scale; ++k)
                     sum += rows[ry][sx + k * 3 + c];
@@ -2256,6 +2263,7 @@ static int area_fast_tail_nxn_cn3(const T* S, T* D, int w, int dx, int scale, in
 template<typename T>
 static int area_fast_tail_nxn_cn4(const T* S, T* D, int w, int dx, int scale, int step)
 {
+    typedef typename area_fast_wt<T>::type WT;
     const int area = scale * scale;
     const T* rows[10] = { S, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     rows[1] = (const T*)((const uchar*)S + step);
@@ -2267,7 +2275,7 @@ static int area_fast_tail_nxn_cn4(const T* S, T* D, int w, int dx, int scale, in
         const int sx = dx * scale;
         for (int c = 0; c < 4; ++c)
         {
-            int sum = 0;
+            WT sum = 0;
             for (int ry = 0; ry < scale; ++ry)
                 for (int k = 0; k < scale; ++k)
                     sum += rows[ry][sx + k * 4 + c];
@@ -2459,27 +2467,26 @@ static inline v_uint32 area_fast_plane_row_quads(const v_uint8& plane)
     return area_fast_byte_sum_u32(v_reinterpret_as_u32(plane));
 }
 
+static inline v_uint32 area_fast_scale_round(const v_uint32& sum, float inv_area)
+{
+    return v_reinterpret_as_u32(v_round(v_mul(v_cvt_f32(v_reinterpret_as_s32(sum)),
+                                              vx_setall_f32(inv_area))));
+}
+
 static inline void area_fast_store_bgra(uchar* dst, v_uint32 sb, v_uint32 sg, v_uint32 sr, v_uint32 sa)
 {
-    const v_uint32 bias = vx_setall_u32(8);
-    v_uint32 px = v_add(v_add(v_shr<4>(v_add(sb, bias)), v_shl<8>(v_shr<4>(v_add(sg, bias)))),
-                        v_add(v_shl<16>(v_shr<4>(v_add(sr, bias))), v_shl<24>(v_shr<4>(v_add(sa, bias)))));
+    const float inv_area = 1.f / 16;
+    v_uint32 px = v_add(v_add(area_fast_scale_round(sb, inv_area),
+                              v_shl<8>(area_fast_scale_round(sg, inv_area))),
+                        v_add(v_shl<16>(area_fast_scale_round(sr, inv_area)),
+                              v_shl<24>(area_fast_scale_round(sa, inv_area))));
     v_store(reinterpret_cast<uint32_t*>(dst), px);
 }
 
 static inline void area_fast_store_gray_scaled(uchar* dst, const v_uint32& sum, int n, int area)
 {
     CV_DECL_ALIGNED(64) uint32_t tmp[16];
-    if (area == 16)
-        v_store(tmp, v_shr<4>(v_add(sum, vx_setall_u32(8))));
-    else
-    {
-        v_store(tmp, sum);
-        const int half = area / 2;
-        for (int i = 0; i < n; ++i)
-            dst[i] = (uchar)((tmp[i] + half) / area);
-        return;
-    }
+    v_store(tmp, area_fast_scale_round(sum, 1.f / area));
     for (int i = 0; i < n; ++i)
         dst[i] = (uchar)tmp[i];
 }
@@ -2491,27 +2498,11 @@ static inline void area_fast_store_gray(uchar* dst, const v_uint32& sum, int n)
 
 static inline void area_fast_store_rgb_scaled(uchar* dst, v_uint32 sb, v_uint32 sg, v_uint32 sr, int n, int area)
 {
-    const int half = area / 2;
+    const float inv_area = 1.f / area;
     CV_DECL_ALIGNED(64) uint32_t b[16], g[16], r[16];
-    if (area == 16)
-    {
-        const v_uint32 bias = vx_setall_u32(8);
-        v_store(b, v_shr<4>(v_add(sb, bias)));
-        v_store(g, v_shr<4>(v_add(sg, bias)));
-        v_store(r, v_shr<4>(v_add(sr, bias)));
-    }
-    else
-    {
-        v_store(b, sb);
-        v_store(g, sg);
-        v_store(r, sr);
-        for (int i = 0; i < n; ++i)
-        {
-            b[i] = (b[i] + half) / area;
-            g[i] = (g[i] + half) / area;
-            r[i] = (r[i] + half) / area;
-        }
-    }
+    v_store(b, area_fast_scale_round(sb, inv_area));
+    v_store(g, area_fast_scale_round(sg, inv_area));
+    v_store(r, area_fast_scale_round(sr, inv_area));
     uchar* p = dst;
     for (int i = 0; i < n; ++i)
     {
@@ -2524,30 +2515,12 @@ static inline void area_fast_store_rgb_scaled(uchar* dst, v_uint32 sb, v_uint32 
 
 static inline void area_fast_store_bgra_scaled(uchar* dst, v_uint32 sb, v_uint32 sg, v_uint32 sr, v_uint32 sa, int n, int area)
 {
-    const int half = area / 2;
+    const float inv_area = 1.f / area;
     CV_DECL_ALIGNED(64) uint32_t b[16], g[16], r[16], a[16];
-    if (area == 16)
-    {
-        const v_uint32 bias = vx_setall_u32(8);
-        v_store(b, v_shr<4>(v_add(sb, bias)));
-        v_store(g, v_shr<4>(v_add(sg, bias)));
-        v_store(r, v_shr<4>(v_add(sr, bias)));
-        v_store(a, v_shr<4>(v_add(sa, bias)));
-    }
-    else
-    {
-        v_store(b, sb);
-        v_store(g, sg);
-        v_store(r, sr);
-        v_store(a, sa);
-        for (int i = 0; i < n; ++i)
-        {
-            b[i] = (b[i] + half) / area;
-            g[i] = (g[i] + half) / area;
-            r[i] = (r[i] + half) / area;
-            a[i] = (a[i] + half) / area;
-        }
-    }
+    v_store(b, area_fast_scale_round(sb, inv_area));
+    v_store(g, area_fast_scale_round(sg, inv_area));
+    v_store(r, area_fast_scale_round(sr, inv_area));
+    v_store(a, area_fast_scale_round(sa, inv_area));
     for (int i = 0; i < n; ++i)
     {
         uint32_t px = b[i] | (g[i] << 8) | (r[i] << 16) | (a[i] << 24);
@@ -2557,20 +2530,7 @@ static inline void area_fast_store_bgra_scaled(uchar* dst, v_uint32 sb, v_uint32
 
 static inline void area_fast_store_rgb(uchar* dst, v_uint32 sb, v_uint32 sg, v_uint32 sr)
 {
-    const int n = VTraits<v_uint32>::vlanes();
-    CV_DECL_ALIGNED(64) uint32_t b[16], g[16], r[16];
-    const v_uint32 bias = vx_setall_u32(8);
-    v_store(b, v_shr<4>(v_add(sb, bias)));
-    v_store(g, v_shr<4>(v_add(sg, bias)));
-    v_store(r, v_shr<4>(v_add(sr, bias)));
-    uchar* p = dst;
-    for (int i = 0; i < n; ++i)
-    {
-        p[0] = (uchar)b[i];
-        p[1] = (uchar)g[i];
-        p[2] = (uchar)r[i];
-        p += 3;
-    }
+    area_fast_store_rgb_scaled(dst, sb, sg, sr, VTraits<v_uint32>::vlanes(), 16);
 }
 
 static int area_fast_u8_cn4_4x4(const uchar* S, uchar* D, int w, int step, int dx)
@@ -2666,7 +2626,7 @@ static int area_fast_u8_cn1_10x10(const uchar* S, uchar* D, int w, int step, int
         }
 
         for (int i = 0; i < pixBlock; ++i)
-            D[dx + i] = (uchar)((sums[i] + 50) / 100);
+            D[dx + i] = area_fast_round<uchar>((int)sums[i], 100);
     }
     return dx;
 }
@@ -2679,7 +2639,6 @@ static int area_fast_u8_cn3_10x10(const uchar* S, uchar* D, int w, int step, int
                               S + 5 * step, S + 6 * step, S + 7 * step, S + 8 * step, S + 9 * step };
     const int pixBlock = area_fast_10x10_pix_block();
     const int chBlock = pixBlock * 3;
-    const int half = area / 2;
 
     for (; dx <= w - chBlock; dx += chBlock)
     {
@@ -2698,9 +2657,9 @@ static int area_fast_u8_cn3_10x10(const uchar* S, uchar* D, int w, int step, int
         uchar* p = D + dx;
         for (int pi = 0; pi < pixBlock; ++pi)
         {
-            p[0] = (uchar)((sb[pi] + half) / area);
-            p[1] = (uchar)((sg[pi] + half) / area);
-            p[2] = (uchar)((sr[pi] + half) / area);
+            p[0] = area_fast_round<uchar>((int)sb[pi], area);
+            p[1] = area_fast_round<uchar>((int)sg[pi], area);
+            p[2] = area_fast_round<uchar>((int)sr[pi], area);
             p += 3;
         }
     }
@@ -2715,7 +2674,6 @@ static int area_fast_u8_cn4_10x10(const uchar* S, uchar* D, int w, int step, int
                               S + 5 * step, S + 6 * step, S + 7 * step, S + 8 * step, S + 9 * step };
     const int pixBlock = area_fast_10x10_pix_block();
     const int chBlock = pixBlock * 4;
-    const int half = area / 2;
 
     for (; dx <= w - chBlock; dx += chBlock)
     {
@@ -2734,10 +2692,10 @@ static int area_fast_u8_cn4_10x10(const uchar* S, uchar* D, int w, int step, int
         uint32_t* p = reinterpret_cast<uint32_t*>(D + dx);
         for (int pi = 0; pi < pixBlock; ++pi)
         {
-            const uint32_t b = (sb[pi] + half) / area;
-            const uint32_t g = (sg[pi] + half) / area;
-            const uint32_t r = (sr[pi] + half) / area;
-            const uint32_t a = (sa[pi] + half) / area;
+            const uint32_t b = area_fast_round<uchar>((int)sb[pi], area);
+            const uint32_t g = area_fast_round<uchar>((int)sg[pi], area);
+            const uint32_t r = area_fast_round<uchar>((int)sr[pi], area);
+            const uint32_t a = area_fast_round<uchar>((int)sa[pi], area);
             p[pi] = b | (g << 8) | (r << 16) | (a << 24);
         }
     }
@@ -2767,7 +2725,6 @@ public:
 
         uint16x8_t v_2 = vdupq_n_u16(2);
         const uint32x4_t mask = vdupq_n_u32(0xff);
-        const uint32x4_t v_8 = vdupq_n_u32(8);
 
         auto neon_byte_sum_u32 = [&](uint32x4_t v) {
             return vaddq_u32(vaddq_u32(vshrq_n_u32(v, 24), vandq_u32(vshrq_n_u32(v, 16), mask)),
@@ -2776,8 +2733,10 @@ public:
         auto neon_plane_row_quads = [&](uint8x16_t plane) {
             return neon_byte_sum_u32(vreinterpretq_u32_u8(plane));
         };
+        // Rounds half to even, like the saturate_cast<uchar>() of the scalar path.
         auto neon_round16 = [&](uint32x4_t s) {
-            return vshrq_n_u32(vaddq_u32(s, v_8), 4);
+            v_float32x4 f = v_cvt_f32(v_int32x4(vreinterpretq_s32_u32(s)));
+            return vreinterpretq_u32_s32(v_round(v_mul(f, v_setall_f32(1.f / 16))).val);
         };
         auto neon_store_bgra4 = [&](uchar* dst, uint32x4_t sb, uint32x4_t sg, uint32x4_t sr, uint32x4_t sa) {
             uint32x4_t px = vaddq_u32(vaddq_u32(neon_round16(sb), vshlq_n_u32(neon_round16(sg), 8)),
@@ -2807,7 +2766,7 @@ public:
                     sums[7] += area_fast_detail::area_fast_sum10(row + 70);
                 }
                 for (int i = 0; i < pixBlock; ++i)
-                    D[dx + i] = (uchar)((sums[i] + 50) / 100);
+                    D[dx + i] = area_fast_detail::area_fast_round<uchar>((int)sums[i], 100);
             }
             return dx;
         }
@@ -3663,7 +3622,7 @@ struct ResizeAreaFastVec
         scale_x(_scale_x), scale_y(_scale_y), cn(_cn), step(_step),
         vecOp(_scale_x, _scale_y, _cn, _step)
     {
-        fast_mode = area_fast_detail::is_fast_scale(scale_x, scale_y, cn);
+        fast_mode = area_fast_detail::is_fast_scale<T>(scale_x, scale_y, cn);
     }
 
     int operator() (const T* S, T* D, int w) const
